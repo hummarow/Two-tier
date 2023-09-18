@@ -22,6 +22,8 @@ from datasets import get_loaders
 from utils.args import get_args_parser
 from models import get_model
 
+from copy import deepcopy
+
 
 def main(args):
     utils.init_distributed_mode(args)
@@ -49,7 +51,7 @@ def main(args):
     num_tasks = utils.get_world_size()
     global_rank = utils.get_rank()
     data_loader_train, data_loader_val = get_loaders(args, num_tasks, global_rank)
-
+    data_loader_contrastive_train, data_loader_contrastive_val = get_loaders(args, num_tasks, global_rank)
     ##############################################
     # Mixup regularization (by default OFF)
     mixup_fn = None
@@ -98,7 +100,7 @@ def main(args):
         [p for p in model_without_ddp.parameters() if p.requires_grad],
         args.lr,
         momentum=args.momentum,
-        weight_decay=0, # no weight decay for fine-tuning
+        weight_decay=args.weight_decay, # no weight decay for fine-tuning
     )
 
     lr_scheduler, _ = create_scheduler(args, optimizer)
@@ -135,7 +137,7 @@ def main(args):
 
     ##############################################
     # Test
-    test_stats = evaluate(data_loader_val, model, criterion, device, args.seed+10000)
+    test_stats = evaluate(data_loader_val, model, criterion, device, args.seed+10000, args.valepisodes)
     print(f"Accuracy of the network on dataset_val: {test_stats['acc1']:.1f}%")
     if args.output_dir and utils.is_main_process():
         test_stats['epoch'] = -1
@@ -166,7 +168,7 @@ def main(args):
 
         lr_scheduler.step(epoch)
 
-        test_stats = evaluate(data_loader_val, model, criterion, device, args.seed+10000)
+        test_stats = evaluate(data_loader_val, model, criterion, device, args.seed+10000, args.valepisodes)
 
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                      **{f'test_{k}': v for k, v in test_stats.items()},

@@ -10,7 +10,7 @@ def get_args_parser():
     parser.add_argument('--epochs', default=100, type=int)
     parser.add_argument('--fp16', action='store_true',
                         help="Whether to use 16-bit float precision instead of 32-bit")
-    parser.set_defaults(fp16=True)
+#     parser.set_defaults(fp16=True)
     parser.add_argument('--output_dir', default='outputs/tmp',
                         help='path where to save, empty for no saving')
     parser.add_argument('--device', default='cuda',
@@ -37,6 +37,8 @@ def get_args_parser():
                         help="Number of episodes for validation.")
     parser.add_argument("--nEpisode", default=2000, type=int,
                         help="Number of episodes for training / testing.")
+    parser.add_argument("--valepisodes", default=120, type=int,
+                        help="Number of episodes for validation. Not used when loading the data.")
 
     # MetaDataset parameters
     parser.add_argument('--image_size', type=int, default=128,
@@ -102,6 +104,7 @@ def get_args_parser():
 
     # Deployment params
     parser.add_argument("--deploy", type=str, default="vanilla",
+                        choices=['vanilla', 'finetune', 'finetune_autolr', 'ada_tokens', 'ada_tokens_entmin', 'maml_l2l', 'maml'],
                         help="Which few-shot model to be deployed for meta-testing.")
     parser.add_argument('--num_adapters', default=1, type=int, help='Number of adapter tokens')
     parser.add_argument('--ada_steps', default=40, type=int, help='Number of feature adaptation steps')
@@ -135,8 +138,9 @@ def get_args_parser():
                         help='Clip gradient norm (default: None, no clipping)')
     parser.add_argument('--momentum', type=float, default=0.9, metavar='M',
                         help='SGD momentum (default: 0.9)')
-    parser.add_argument('--weight-decay', type=float, default=0.05,
-                        help='weight decay (default: 0.05)')
+    parser.add_argument('--weight-decay', type=float, default=0.0,
+                        help='weight decay (default: 0.0)')
+                        # help='weight decay (default: 0.05)')
 
     # Learning rate schedule parameters
     parser.add_argument('--sched', default='cosine', type=str, metavar='SCHEDULER',
@@ -226,4 +230,18 @@ def get_args_parser():
     parser.add_argument('--world_size', default=1, type=int,
                         help='number of distributed processes')
     parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
+
+    # MAML parameters
+    parser.add_argument('--inner_steps', default=5, type=int, help='Number of inner loop steps')
+    parser.add_argument('--inner_eval_steps', default=10, type=int, help='Number of inner loop steps for evaluation')
+    parser.add_argument('--inner_lr', default=0.01, type=float, help='Learning rate of inner loop')
+#     parser.add_argument('--meta_lr', default=0.001, type=float, help='Learning rate of meta optimizer')
+#     parser.add_argument('--meta_steps', default=1, type=int, help='Number of meta steps')
+    parser.add_argument('--first_order', action='store_true', help='Use first order approximation of MAML')
+    
+    # Contrastive Learning parameters
+    parser.add_argument('--contrastive_lr', default=0.0001, type=float, help='Learning rate of contrastive learning')
+    parser.add_argument('--contrastive_steps', default=5, type=int, help='Number of contrastive learning steps')
+
+
     return parser

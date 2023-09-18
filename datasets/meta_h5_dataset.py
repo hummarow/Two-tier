@@ -15,7 +15,7 @@ from .meta_dataset import dataset_spec as dataset_spec_lib
 
 
 class FullMetaDatasetH5(torch.utils.data.Dataset):
-    def __init__(self, args, split=Split['TRAIN']):
+    def __init__(self, args, split=Split['TRAIN'], source=None):
         super().__init__()
 
         # Data & episodic configurations
@@ -23,8 +23,12 @@ class FullMetaDatasetH5(torch.utils.data.Dataset):
         episod_config = config_lib.EpisodeDescriptionConfig(args)
 
         if split == Split.TRAIN:
-            datasets = args.base_sources
-            episod_config.num_episodes = args.nEpisode
+            if source is None:
+                datasets = args.base_sources
+                episod_config.num_episodes = args.nEpisode
+            else:
+                datasets = [source]
+                episod_config.num_episodes = args.nEpisode // len(args.base_sources)
         elif split == Split.VALID:
             datasets = args.val_sources
             episod_config.num_episodes = args.nValEpisode

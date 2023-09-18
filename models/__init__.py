@@ -3,6 +3,7 @@ import numpy as np
 import torch
 #from timm.models import create_model
 from .protonet import ProtoNet
+from .maml import Meta_mini
 from .deploy import ProtoNet_Finetune, ProtoNet_Auto_Finetune, ProtoNet_AdaTok, ProtoNet_AdaTok_EntMin
 
 
@@ -165,6 +166,11 @@ def get_backbone(args):
 
         # remove the fully-connected layer
         model.fc = torch.nn.Identity()
+    
+    elif args.arch in ['conv4']:
+        import learn2learn as l2l
+        model = l2l.vision.models.CNN4Backbone(hidden_size=64)
+        return model
 
     else:
         raise ValueError(f'{args.arch} is not conisdered in the current code.')
@@ -174,6 +180,35 @@ def get_backbone(args):
 
 def get_model(args):
     backbone = get_backbone(args)
+    _conv_kernel = 3
+    _conv_stride = 1
+    _conv_pad = 0
+    _pool_kernel = 2
+    _pool_stride = 2
+    _pool_pad = 0
+
+    model_config_no_classifier = [
+        # [ch_out, ch_in, kernel, kernel, stride, pad]
+        ("conv2d", [32, 3, _conv_kernel, _conv_kernel, _conv_stride, _conv_pad]),
+        ("relu", [True]),  # [inplace]
+        ("bn", [32]),  # [ch_out]
+        # [kernel, stride, padding]
+        ("max_pool2d", [_pool_kernel, _pool_stride, _pool_pad]),
+    ]
+    model_config_no_classifier.extend(
+        [
+            ("conv2d", [32, 32, _conv_kernel, _conv_kernel, _conv_stride, _conv_pad]),
+            ("relu", [True]),
+            ("bn", [32]),
+            ("max_pool2d", [_pool_kernel, _pool_stride, _pool_pad]),
+        ]
+        * 3
+    )  # Due to different input channel of conv2d layer
+    model_config_no_classifier.extend(
+        [
+            ("flatten", []),
+        ]
+    )
 
     if args.deploy == 'vanilla':
         model = ProtoNet(backbone)
@@ -187,6 +222,8 @@ def get_model(args):
     elif args.deploy == 'ada_tokens_entmin':
         model = ProtoNet_AdaTok_EntMin(backbone, args.num_adapters,
                                        args.ada_steps, args.ada_lr)
+    elif args.deploy == 'maml':
+        model = Meta_mini(args.lr, args.inner_lr, args.inner_steps, args.inner_eval_steps, args.contrastive_lr, args.contrastive_steps, args.first_order, model_config_no_classifier)
     else:
         raise ValueError(f'deploy method {args.deploy} is not supported.')
     return model

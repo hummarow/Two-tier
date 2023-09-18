@@ -11,9 +11,11 @@ from timm.utils import accuracy, ModelEma
 
 import utils.deit_util as utils
 from utils import AverageMeter, to_device
+from models import Meta_mini
+from copy import deepcopy
 
 
-def train_one_epoch(data_loader: Iterable,
+def train_one_epoch(data_loader_dict: dict,
                     model: torch.nn.Module,
                     criterion: torch.nn.Module,
                     optimizer: torch.optim.Optimizer,
@@ -27,64 +29,115 @@ def train_one_epoch(data_loader: Iterable,
                     writer: Optional[SummaryWriter] = None,
                     set_training_mode=True):
 
-    global_step = epoch * len(data_loader)
+    global_step = epoch * len(data_loader_dict)
 
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
+    for source in data_loader_dict.keys():
+        metric_logger.add_meter(f'loss/{source}', utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
+        metric_logger.add_meter(f'acc/{source}', utils.SmoothedValue(window_size=1, fmt='{value:.4f}'))
     metric_logger.add_meter('n_ways', utils.SmoothedValue(window_size=1, fmt='{value:d}'))
     metric_logger.add_meter('n_imgs', utils.SmoothedValue(window_size=1, fmt='{value:d}'))
     header = 'Epoch: [{}]'.format(epoch)
-    print_freq = 10
-
+    print_freq = 5
+    
     model.train(set_training_mode)
+    batch_per_source = {}
+    loss_per_source, acc_per_source = {}, {}
+    length = len(data_loader_dict['aircraft'])
+    data_loader_dict = {k: enumerate(v) for k, v in data_loader_dict.items()}
 
-    for batch in metric_logger.log_every(data_loader, print_freq, header):
-        batch = to_device(batch, device)
-        SupportTensor, SupportLabel, x, y = batch
+    while True:
+        # print(global_step)
+        for source, data_loader in data_loader_dict.items():
+            try:
+                i, batch_per_source[source] = next(data_loader)
+            except StopIteration:
+                batch_per_source[source] = None
+            if source=='aircraft':
+                print(f'{i}/{length}')
+        if all([batch is None for batch in batch_per_source.values()]):
+            break
+        model.meta_optim.zero_grad()
+        for i, (source, batch) in enumerate(batch_per_source.items()):
+            if batch is None:
+                continue
+            batch = to_device(batch, device)
+            SupportTensor, SupportLabel, x, y = batch
 
-        if mixup_fn is not None:
-            x, y = mixup_fn(x, y)
+            if mixup_fn is not None:
+                x, y = mixup_fn(x, y)
+            x = x.requires_grad_(True)
+            # forward
+            with torch.cuda.amp.autocast(fp16):
+                if isinstance(model, Meta_mini):
+                    loss_value, acc1 = model(SupportTensor, SupportLabel, x, y)
+                else:
+                    output = model(SupportTensor, SupportLabel, x)
+                    output = output.view(x.shape[0] * x.shape[1], -1)
+                    y = y.view(-1)
+                    loss = criterion(output, y)
+                    loss_value = loss.item()
+                    if not math.isfinite(loss_value):
+                        print("Loss is {}, stopping training".format(loss_value))
+                        sys.exit(1)
 
-        # forward
-        with torch.cuda.amp.autocast(fp16):
-            output = model(SupportTensor, SupportLabel, x)
+                    optimizer.zero_grad()
 
-        output = output.view(x.shape[0] * x.shape[1], -1)
-        y = y.view(-1)
-        loss = criterion(output, y)
-        loss_value = loss.item()
+                    if fp16:
+                        # this attribute is added by timm on one optimizer (adahessian)
+                        is_second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
+                        loss_scaler(loss, optimizer, clip_grad=max_norm,
+                                    parameters=model.parameters(), create_graph=is_second_order)
+                    else:
+                        loss.backward()
+                        optimizer.step()
+            # model_per_source[source] = model
+            loss_per_source[source] = loss_value
+            acc_per_source[source] = acc1
+            # Average the model weights across all source domains
+            # base_model.load_state_dict({name: sum([model_per_source[source].state_dict()[name] for source in model_per_source.keys()]) / len(model_per_source.keys()) for name in model_per_source[source].state_dict().keys()})
 
-        if not math.isfinite(loss_value):
-            print("Loss is {}, stopping training".format(loss_value))
-            sys.exit(1)
+            torch.cuda.synchronize()
+            if model_ema is not None:
+                model_ema.update(model)
 
-        optimizer.zero_grad()
+            # lr = optimizer.param_groups[0]["lr"]
+            lr = model.meta_lr
+            metric_logger.update(loss=loss_value)
+            metric_logger.update(**{f'loss/{source}': loss_value})
+            metric_logger.update(**{f'acc/{source}': acc1})
+            metric_logger.update(lr=lr)
+            metric_logger.update(n_ways=SupportLabel.max()+1)
+            metric_logger.update(n_imgs=SupportTensor.shape[1] + x.shape[1])
 
-        if fp16:
-            # this attribute is added by timm on one optimizer (adahessian)
-            is_second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
-            loss_scaler(loss, optimizer, clip_grad=max_norm,
-                        parameters=model.parameters(), create_graph=is_second_order)
-        else:
-            loss.backward()
-            optimizer.step()
-
-        torch.cuda.synchronize()
-        if model_ema is not None:
-            model_ema.update(model)
-
-        lr = optimizer.param_groups[0]["lr"]
-        metric_logger.update(loss=loss_value)
-        metric_logger.update(lr=lr)
-        metric_logger.update(n_ways=SupportLabel.max()+1)
-        metric_logger.update(n_imgs=SupportTensor.shape[1] + x.shape[1])
-
-        # tensorboard
-        if utils.is_main_process() and global_step % print_freq == 0:
-            writer.add_scalar("train/loss", scalar_value=loss_value, global_step=global_step)
-            writer.add_scalar("train/lr", scalar_value=lr, global_step=global_step)
+            # tensorboard
+            if utils.is_main_process() and global_step % print_freq == 0:
+                # writer.add_scalar(f"train/{source}/loss", scalar_value=loss_value, global_step=global_step)
+                # writer.add_scalar(f"train/{source}/acc1", scalar_value=acc1, global_step=global_step)
+                writer.add_scalar(f"loss/{source}", scalar_value=loss_value, global_step=global_step)
+                writer.add_scalar(f"acc/{source}", scalar_value=acc1, global_step=global_step)
+                # writer.add_scalar(f"train/lr", scalar_value=lr, global_step=global_step)
 
         global_step += 1
+        model.meta_optim.step()
+        average_loss = sum(loss_per_source.values()) / len(loss_per_source.values())
+        average_acc = sum(acc_per_source.values()) / len(acc_per_source.values())
+
+        if utils.is_main_process() and global_step % print_freq == 0:
+            # writer.add_scalar(f"train/average/loss", scalar_value=average_loss, global_step=global_step)
+            # writer.add_scalar(f"train/average/acc1", scalar_value=average_acc, global_step=global_step)
+            writer.add_scalar(f"loss/average", scalar_value=average_loss, global_step=global_step)
+            writer.add_scalar(f"acc/average", scalar_value=average_acc, global_step=global_step)
+            # print('* Acc@1 {top1.global_avg:.3f} loss {losses.global_avg:.3f}'.format(top1=metric_logger.acc1, losses=metric_logger.loss))
+            # Print average losses over each source domain
+            # for source in data_loader_dict.keys():
+                # print(f'* {source} Acc@1 {metric_logger.meters[f"acc/{source}"].global_avg:.3f} loss {metric_logger.meters[f"loss/{source}"].global_avg:.3f}')
+            print_string = ""
+            for source in data_loader_dict.keys():
+                print_string += f'* {source} Acc@1 {metric_logger.meters[f"acc/{source}"].global_avg:.3f} loss {metric_logger.meters[f"loss/{source}"].global_avg:.3f}  '
+            print(print_string)
+            
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
@@ -100,7 +153,7 @@ def evaluate(data_loaders, model, criterion, device, seed=None, ep=None):
         for j, (source, data_loader) in enumerate(data_loaders.items()):
             print(f'* Evaluating {source}:')
             seed_j = seed + j if seed else None
-            test_stats = _evaluate(data_loader, model, criterion, device, seed_j)
+            test_stats = _evaluate(data_loader, model, criterion, device, seed_j, ep)
             test_stats_lst[source] = test_stats
             test_stats_glb[source] = test_stats['acc1']
 
@@ -116,15 +169,28 @@ def evaluate(data_loaders, model, criterion, device, seed=None, ep=None):
         return _evaluate(data_loaders, model, criterion, device, seed)
 
 
-@torch.no_grad()
+def _no_grad_if_not_maml(func):
+    '''
+    Gradient should be calculated in MAML,
+    because needs to backprop in the inner loop.
+    '''
+    def wrapper(*args, **kwargs):
+        if not isinstance(args[1], Meta_mini):
+            with torch.no_grad():
+                return func(*args, **kwargs)
+        else:
+            return func(*args, **kwargs)
+    return wrapper
+
+
+@_no_grad_if_not_maml
 def _evaluate(data_loader, model, criterion, device, seed=None, ep=None):
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('n_ways', utils.SmoothedValue(window_size=1, fmt='{value:d}'))
     metric_logger.add_meter('n_imgs', utils.SmoothedValue(window_size=1, fmt='{value:d}'))
     metric_logger.add_meter('acc1', utils.SmoothedValue(window_size=len(data_loader.dataset)))
-    metric_logger.add_meter('acc5', utils.SmoothedValue(window_size=len(data_loader.dataset)))
+    # metric_logger.add_meter('acc5', utils.SmoothedValue(window_size=len(data_loader.dataset)))
     header = 'Test:'
-
     # switch to evaluation mode
     model.eval()
 
@@ -132,6 +198,7 @@ def _evaluate(data_loader, model, criterion, device, seed=None, ep=None):
         data_loader.generator.manual_seed(seed)
 
     for ii, batch in enumerate(metric_logger.log_every(data_loader, 10, header)):
+    # for ii, batch in enumerate(data_loader):
         if ep is not None:
             if ii > ep:
                 break
@@ -141,24 +208,28 @@ def _evaluate(data_loader, model, criterion, device, seed=None, ep=None):
 
         # compute output
         with torch.cuda.amp.autocast():
-            output = model(SupportTensor, SupportLabel, x)
+            if isinstance(model, Meta_mini):
+                loss, acc1 = model.evaluate(SupportTensor, SupportLabel, x, y)
+            else:
+                output = model(SupportTensor, SupportLabel, x)
 
-        output = output.view(x.shape[0] * x.shape[1], -1)
-        y = y.view(-1)
-        loss = criterion(output, y)
-        acc1, acc5 = accuracy(output, y, topk=(1, 5))
+                output = output.view(x.shape[0] * x.shape[1], -1)
+                y = y.view(-1)
+                loss = criterion(output, y)
+                acc1, acc5 = accuracy(output, y, topk=(1, 5))
 
         batch_size = x.shape[0]
         metric_logger.update(loss=loss.item())
         metric_logger.meters['acc1'].update(acc1.item(), n=batch_size)
-        metric_logger.meters['acc5'].update(acc5.item(), n=batch_size)
+        # metric_logger.meters['acc5'].update(acc5.item(), n=batch_size)
         metric_logger.update(n_ways=SupportLabel.max()+1)
         metric_logger.update(n_imgs=SupportTensor.shape[1] + x.shape[1])
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
-    print('* Acc@1 {top1.global_avg:.3f} Acc@5 {top5.global_avg:.3f} loss {losses.global_avg:.3f}'
-          .format(top1=metric_logger.acc1, top5=metric_logger.acc5, losses=metric_logger.loss))
+
+    print('* Acc@1 {top1.global_avg:.3f} loss {losses.global_avg:.3f}'
+          .format(top1=metric_logger.acc1, losses=metric_logger.loss))
 
     ret_dict = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
     ret_dict['acc_std'] = metric_logger.meters['acc1'].std

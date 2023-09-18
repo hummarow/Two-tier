@@ -24,7 +24,9 @@ def get_sets(args):
             trainSet = valSet = None
             testSet = FullMetaDatasetH5(args, Split.TEST)
         else:
-            trainSet = FullMetaDatasetH5(args, Split.TRAIN)
+            trainSet = {}
+            for source in args.base_sources:
+                trainSet[source] = FullMetaDatasetH5(args, Split.TRAIN, source)
             valSet = {}
             for source in args.val_sources:
                 valSet[source] = MetaValDataset(os.path.join(args.data_path, source,
@@ -33,7 +35,7 @@ def get_sets(args):
             testSet = None
         return trainSet, valSet, testSet
     else:
-        raise ValueError(f'{dataset} is not supported.')
+        raise ValueError(f'{args.dataset} is not supported.')
 
     # If not meta_dataset
     trainTransform, valTransform, inputW, inputH, \
@@ -72,7 +74,7 @@ def get_loaders(args, num_tasks, global_rank):
     if args.eval:
         _, _, dataset_vals = get_sets(args)
     else:
-        dataset_train, dataset_vals, _ = get_sets(args)
+        dataset_trains, dataset_vals, _ = get_sets(args)
 
     # Worker init function
     if 'meta_dataset' in args.dataset: # meta_dataset & meta_dataset_h5
@@ -127,30 +129,38 @@ def get_loaders(args, num_tasks, global_rank):
         return None, data_loader_val
 
     # Train loader
-    if args.distributed:
-        if args.repeated_aug: # (by default OFF)
-            sampler_train = RASampler(
-                dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
-            )
+    if not isinstance(dataset_trains, dict):
+        dataset_trains = {'single': dataset_trains}
+    data_loader_train = {}
+    for j, (source, dataset_train) in enumerate(dataset_trains.items()):
+        if args.distributed:
+            if args.repeated_aug: # (by default OFF)
+                sampler_train = RASampler(
+                    dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
+                )
+            else:
+                sampler_train = torch.utils.data.DistributedSampler(
+                    dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
+                )
         else:
-            sampler_train = torch.utils.data.DistributedSampler(
-                dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
-            )
-    else:
-        sampler_train = torch.utils.data.RandomSampler(dataset_train)
+            sampler_train = torch.utils.data.RandomSampler(dataset_train)
 
-    generator = torch.Generator()
-    generator.manual_seed(args.seed)
+        generator = torch.Generator()
+        generator.manual_seed(args.seed)
 
-    data_loader_train = torch.utils.data.DataLoader(
-        dataset_train, sampler=sampler_train,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        pin_memory=args.pin_mem,
-        drop_last=True,
-        worker_init_fn=worker_init_fn,
-        generator=generator
-    )
+        data_loader = torch.utils.data.DataLoader(
+            dataset_train, sampler=sampler_train,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            pin_memory=args.pin_mem,
+            drop_last=True,
+            worker_init_fn=worker_init_fn,
+            generator=generator
+        )
+        data_loader_train[source] = data_loader
+
+    if 'single' in dataset_trains:
+        data_loader_train = data_loader_train['single']
 
     return data_loader_train, data_loader_val
 
