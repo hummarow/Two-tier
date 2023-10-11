@@ -102,7 +102,7 @@ class INet1kFewshotDataset(torch.utils.data.Dataset):
         query_images = []
         query_labels = []
 
-        episode_description = self.sampler.sample_episode_description()
+        episode_description = self.sampler.sample_episode_description(idx)
         episode_description = tuple( # relative ids --> abs ids
             (class_id + self.sampler.class_set[0], num_support, num_query)
             for class_id, num_support, num_query in episode_description)

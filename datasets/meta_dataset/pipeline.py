@@ -93,7 +93,7 @@ class EpisodicDataset(torch.utils.data.Dataset):
         query_images = []
         query_labels = []
 
-        episode_description = self.sampler.sample_episode_description()
+        episode_description = self.sampler.sample_episode_description(idx)
         episode_classes = list({class_ for class_, _, _ in episode_description})
         #return episode_classes # DEBUG
 

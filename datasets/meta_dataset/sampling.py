@@ -368,13 +368,16 @@ class EpisodeDescriptionSampler(object):
                                  '`EpisodeDescriptionSampler.min_ways` in gin, or '
                                  'or MAX_SPANNING_LEAVES_ELIGIBLE in data.py.')
 
-    def sample_class_ids(self):
+    def sample_class_ids(self, seed):
         """Returns the (relative) class IDs for an episode.
 
         If self.use_dag_hierarchy, it samples them according to a procedure
         informed by the dataset's ontology, otherwise randomly.
         If self.min_examples_in_class > 0, classes with too few examples will not
         be selected.
+
+        :param seed: Should be the iteration number - the number of episodes sampled so far, so that the same number of classes are sampled for the same iteration number.
+
         """
         prob = [1.0, 0.0]
         if self.ignore_hierarchy_probability:
@@ -386,9 +389,11 @@ class EpisodeDescriptionSampler(object):
         if self.use_dag_hierarchy and np.random.choice([True, False], p=prob):
             # Retrieve the list of relative class IDs for an internal node sampled
             # uniformly at random.
+            breakpoint()
             episode_classes_rel = np.random.choice(self.span_leaves_rel)  # noqa: E111
             # print(torch.utils.data.get_worker_info(), episode_classes_rel)
             # If the number of chosen classes is larger than desired, sub-sample them.
+            # ???: Why not just sample less classes less than the max_ways_upper_bound?
             if len(episode_classes_rel) > self.max_ways_upper_bound:  # noqa: E111
                 episode_classes_rel = np.random.choice(
                     episode_classes_rel,
@@ -439,14 +444,14 @@ class EpisodeDescriptionSampler(object):
 
         return episode_classes_rel
 
-    def sample_episode_description(self):  # noqa: E111
+    def sample_episode_description(self, i):  # noqa: E111
         """Returns the composition of an episode.
 
         Returns:
           A sequence of `(class_id, num_support, num_query)` tuples, where
             relative `class_id` is an integer in [0, self.num_classes).
         """
-        class_ids = self.sample_class_ids()
+        class_ids = self.sample_class_ids(i)
         images_per_class = np.array([
             self.dataset_spec.get_total_images_per_class(
                 self.class_set[cid]) for cid in class_ids

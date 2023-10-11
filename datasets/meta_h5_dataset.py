@@ -133,7 +133,7 @@ class FullMetaDatasetH5(torch.utils.data.Dataset):
         sampler = self.class_samplers[source]
 
         # episode details: (class_id, nb_supp, nb_qry)
-        episode_description = sampler.sample_episode_description()
+        episode_description = sampler.sample_episode_description(idx)
         episode_description = tuple( # relative ids --> abs ids
             (class_id + sampler.class_set[0], num_support, num_query)
             for class_id, num_support, num_query in episode_description)
