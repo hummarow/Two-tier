@@ -13,6 +13,7 @@ import utils.deit_util as utils
 from utils import AverageMeter, to_device
 from models import Meta_mini
 from copy import deepcopy
+from tqdm import tqdm
 
 
 def train_one_epoch(data_loader_dict: dict,
@@ -27,7 +28,9 @@ def train_one_epoch(data_loader_dict: dict,
                     model_ema: Optional[ModelEma] = None,
                     mixup_fn: Optional[Mixup] = None,
                     writer: Optional[SummaryWriter] = None,
-                    set_training_mode=True):
+                    set_training_mode=True,
+                    pretrain=False,
+                    ):
 
     global_step = epoch * len(data_loader_dict)
 
@@ -44,9 +47,35 @@ def train_one_epoch(data_loader_dict: dict,
     model.train(set_training_mode)
     batch_per_source = {}
     loss_per_source, acc_per_source = {}, {}
-    length = len(data_loader_dict['aircraft'])
-    data_loader_dict = {k: enumerate(v) for k, v in data_loader_dict.items()}
 
+    if pretrain:
+        data_loader = data_loader_dict['ilsvrc_2012']
+        avg_loss = 0
+        avg_acc = 0
+        model.meta_optim.zero_grad()
+        for i, batch in enumerate(data_loader):
+            batch = to_device(batch, device)
+            SupportTensor, SupportLabel, x, y = batch
+            loss, acc1 = model.pretrain(SupportTensor, SupportLabel, x, y)
+            
+            avg_loss += loss
+            avg_acc += acc1
+        # avg_loss.backward()
+        # model.meta_optim.step()
+        # avg_loss = avg_loss.item()
+        print(f'Pretrain loss: {avg_loss / len(data_loader)}')
+        print(f'Pretrain acc: {avg_acc / len(data_loader)}')
+        metric_logger.update(loss=loss_value)
+        metric_logger.update(**{f'loss/{source}': loss_value})
+        metric_logger.update(**{f'acc/{source}': acc1})
+        metric_logger.update(lr=model.meta_lr)
+        metric_logger.update(n_ways=SupportLabel.max()+1)
+        metric_logger.update(n_imgs=SupportTensor.shape[1] + x.shape[1])
+        metric_logger.synchronize_between_processes()
+        print("Averaged stats:", metric_logger)
+        return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+    
+    data_loader_dict = {k: enumerate(v) for k, v in data_loader_dict.items()}
     while True:
         # print(global_step)
         for source, data_loader in data_loader_dict.items():
@@ -54,17 +83,17 @@ def train_one_epoch(data_loader_dict: dict,
                 i, batch_per_source[source] = next(data_loader)
             except StopIteration:
                 batch_per_source[source] = None
-            if source=='aircraft':
-                print(f'{i}/{length}')
         if all([batch is None for batch in batch_per_source.values()]):
+            # breakpoint()
             break
-        model.meta_optim.zero_grad()
+        # model.meta_optim.zero_grad() # not avtivated when using TEST code
         for i, (source, batch) in enumerate(batch_per_source.items()):
             if batch is None:
                 continue
             batch = to_device(batch, device)
             SupportTensor, SupportLabel, x, y = batch
-
+            # TEST backward for every source
+            model.meta_optim.zero_grad()
             if mixup_fn is not None:
                 x, y = mixup_fn(x, y)
             x = x.requires_grad_(True)
@@ -118,9 +147,10 @@ def train_one_epoch(data_loader_dict: dict,
                 writer.add_scalar(f"loss/{source}", scalar_value=loss_value, global_step=global_step)
                 writer.add_scalar(f"acc/{source}", scalar_value=acc1, global_step=global_step)
                 # writer.add_scalar(f"train/lr", scalar_value=lr, global_step=global_step)
-
+            # TEST backward for every source
+            model.meta_optim.step()
         global_step += 1
-        model.meta_optim.step()
+        # model.meta_optim.step() # not avtivated when using TEST code
         average_loss = sum(loss_per_source.values()) / len(loss_per_source.values())
         average_acc = sum(acc_per_source.values()) / len(acc_per_source.values())
 
@@ -145,7 +175,7 @@ def train_one_epoch(data_loader_dict: dict,
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 
-def evaluate(data_loaders, model, criterion, device, seed=None, ep=None):
+def evaluate(data_loaders, model, criterion, device, writer, seed=None, ep=None):
     if isinstance(data_loaders, dict):
         test_stats_lst = {}
         test_stats_glb = {}
@@ -156,10 +186,19 @@ def evaluate(data_loaders, model, criterion, device, seed=None, ep=None):
             test_stats = _evaluate(data_loader, model, criterion, device, seed_j, ep)
             test_stats_lst[source] = test_stats
             test_stats_glb[source] = test_stats['acc1']
-
+            # Record in tensorboard
+            if utils.is_main_process():
+                writer.add_scalar(f"test/{source}/acc1", scalar_value=test_stats['acc1'], global_step=ep)
+                writer.add_scalar(f"test/{source}/loss", scalar_value=test_stats['loss'], global_step=ep)
+                writer.close()
         # apart from individual's acc1, accumulate metrics over all domains to compute mean
         for k in test_stats_lst[source].keys():
             test_stats_glb[k] = torch.tensor([test_stats[k] for test_stats in test_stats_lst.values()]).mean().item()
+        # Record in tensorboard
+        if utils.is_main_process():
+            writer.add_scalar(f"test/average/acc1", scalar_value=test_stats_glb['acc1'], global_step=ep)
+            writer.add_scalar(f"test/average/loss", scalar_value=test_stats_glb['loss'], global_step=ep)
+            writer.close()
 
         return test_stats_glb
     elif isinstance(data_loaders, torch.utils.data.DataLoader): # when args.eval = True

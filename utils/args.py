@@ -242,6 +242,10 @@ def get_args_parser():
     # Contrastive Learning parameters
     parser.add_argument('--contrastive_lr', default=0.0001, type=float, help='Learning rate of contrastive learning')
     parser.add_argument('--contrastive_steps', default=5, type=int, help='Number of contrastive learning steps')
+    parser.add_argument('--contrastive_eval_steps', default=10, type=int, help='Number of contrastive learning steps for evaluation')
+
+
+    parser.add_argument('--pretrain', action='store_true', help='Pretrain the model')
 
 
     return parser

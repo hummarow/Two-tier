@@ -1,0 +1,24 @@
+python main.py \
+--output outputs/imagenet_only_no_contrastive \
+--dataset meta_dataset \
+--epoch 100 \
+--arch=conv4 \
+--device cuda:0 \
+--data-path /home/bjk/hdd1/records/ \
+--deploy=maml \
+--lr=0.001 \
+--decay-epochs=60 \
+--decay-rate=0.55 \
+--weight-decay=3e-6 \
+--inner_steps=5 \
+--inner_lr=0.01 \
+--contrastive_steps=0 \
+--contrastive_lr=0 \
+--inner_eval_steps=11 \
+--num_worker=4 \
+--first_order \
+--base_sources ilsvrc_2012 \
+--val_sources ilsvrc_2012 \
+--test_sources ilsvrc_2012 \
+--nEpisode 250 \
+--valepisodes 20 

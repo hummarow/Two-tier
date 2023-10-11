@@ -27,8 +27,16 @@ from copy import deepcopy
 
 def main(args):
     utils.init_distributed_mode(args)
-
+    if args.pretrain:
+        args.dataset = 'meta_dataset'
+        args.base_sources = ['ilsvrc_2012']
+        args.val_sources = ['ilsvrc_2012']
+        args.test_sources = ['ilsvrc_2012']
+        args.contrastive_lr = 0.0
+        args.contrastive_steps = 0
     print(args)
+    if args.contrastive_lr == 0.0 or args.contrastive_steps == 0:
+        print('No contrastive learning')
     device = torch.device(args.device)
 
     # fix the seed for reproducibility
@@ -51,7 +59,7 @@ def main(args):
     num_tasks = utils.get_world_size()
     global_rank = utils.get_rank()
     data_loader_train, data_loader_val = get_loaders(args, num_tasks, global_rank)
-    data_loader_contrastive_train, data_loader_contrastive_val = get_loaders(args, num_tasks, global_rank)
+    # data_loader_contrastive_train, data_loader_contrastive_val = get_loaders(args, num_tasks, global_rank)
     ##############################################
     # Mixup regularization (by default OFF)
     mixup_fn = None
@@ -134,10 +142,14 @@ def main(args):
                 loss_scaler.load_state_dict(checkpoint['scaler'])
 
         print(f'Resume from {args.resume} at epoch {args.start_epoch}.')
-
+        
+    if utils.is_main_process():
+        writer = SummaryWriter(log_dir=str(output_dir))
+    else:
+        writer = None
     ##############################################
     # Test
-    test_stats = evaluate(data_loader_val, model, criterion, device, args.seed+10000, args.valepisodes)
+    test_stats = evaluate(data_loader_val, model, criterion, device, writer, args.seed+10000, args.valepisodes)
     print(f"Accuracy of the network on dataset_val: {test_stats['acc1']:.1f}%")
     if args.output_dir and utils.is_main_process():
         test_stats['epoch'] = -1
@@ -149,26 +161,22 @@ def main(args):
 
     ##############################################
     # Training
-    if utils.is_main_process():
-        writer = SummaryWriter(log_dir=str(output_dir))
-    else:
-        writer = None
 
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
     max_accuracy = test_stats['acc1']
 
     for epoch in range(args.start_epoch, args.epochs):
-
         train_stats = train_one_epoch(
             data_loader_train, model, criterion, optimizer, epoch, device,
             loss_scaler, args.fp16, args.clip_grad, model_ema, mixup_fn, writer,
-            set_training_mode=False  # TODO: may need eval mode for finetuning
+            set_training_mode=False,  # TODO: may need eval mode for finetuning
+            pretrain=args.pretrain,
         )
 
         lr_scheduler.step(epoch)
 
-        test_stats = evaluate(data_loader_val, model, criterion, device, args.seed+10000, args.valepisodes)
+        test_stats = evaluate(data_loader_val, model, criterion, device, writer, seed=args.seed+10000, ep=args.valepisodes)
 
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                      **{f'test_{k}': v for k, v in test_stats.items()},
