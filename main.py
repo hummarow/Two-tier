@@ -50,7 +50,11 @@ def main(args):
 
     output_dir = Path(args.output_dir)
     if utils.is_main_process():
-        output_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            output_dir.mkdir(parents=True, exist_ok=False)
+        except FileExistsError:
+            input(f'Warning: Output directory "{output_dir}" already exists and is not empty. Press Enter to continue...')
+            output_dir.mkdir(parents=True, exist_ok=True)
         with (output_dir / "log.txt").open("a") as f:
             f.write(" ".join(sys.argv) + "\n")
 

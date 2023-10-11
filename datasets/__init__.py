@@ -22,7 +22,9 @@ def get_sets(args):
     elif args.dataset == 'meta_dataset':
         if args.eval:
             trainSet = valSet = None
-            testSet = FullMetaDatasetH5(args, Split.TEST)
+            testSet = {}
+            for source in args.test_sources:
+                testSet[source] = FullMetaDatasetH5(args, Split.TEST, source)
         else:
             trainSet = {}
             for source in args.base_sources:

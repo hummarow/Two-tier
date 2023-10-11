@@ -33,8 +33,12 @@ class FullMetaDatasetH5(torch.utils.data.Dataset):
             datasets = args.val_sources
             episod_config.num_episodes = args.nValEpisode
         else:
-            datasets = args.test_sources
-            episod_config.num_episodes = 600
+            if source is None:
+                datasets = args.test_sources
+                episod_config.num_episodes = args.nEpisode
+            else:
+                datasets = [source]
+                episod_config.num_episodes = args.nEpisode // len(args.test_sources)
 
         use_dag_ontology_list = [False]*len(datasets)
         use_bilevel_ontology_list = [False]*len(datasets)
