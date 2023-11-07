@@ -31,9 +31,10 @@ def get_sets(args):
                 trainSet[source] = FullMetaDatasetH5(args, Split.TRAIN, source)
             valSet = {}
             for source in args.val_sources:
-                valSet[source] = MetaValDataset(os.path.join(args.data_path, source,
-                                                             f'val_ep{args.nValEpisode}_img{args.image_size}.h5'),
-                                                num_episodes=args.nValEpisode)
+                # valSet[source] = MetaValDataset(os.path.join(args.data_path, source,
+                #                                              f'val_ep{args.nValEpisode}_img{args.image_size}.h5'),
+                #                                 num_episodes=args.nValEpisode)
+                valSet[source] = FullMetaDatasetH5(args, Split.VALID, source)
             testSet = None
         return trainSet, valSet, testSet
     else:
@@ -116,7 +117,7 @@ def get_loaders(args, num_tasks, global_rank):
         data_loader = torch.utils.data.DataLoader(
             dataset_val, sampler=sampler_val,
             batch_size=1,
-            num_workers=3, # more workers can take too much CPU
+            num_workers=args.num_workers, # more workers can take too much CPU
             pin_memory=args.pin_mem,
             drop_last=False,
             worker_init_fn=worker_init_fn,

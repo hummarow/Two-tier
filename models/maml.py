@@ -46,38 +46,40 @@ def transform(img):
 class Meta_mini(nn.Module):
     def __init__(
         self,
-        meta_lr,
-        inner_lr,
-        inner_steps,
-        inner_eval_steps,
-        contrastive_lr,
-        contrastive_steps,
-        contrastive_eval_steps,
-        first_order,
+        args,
         config,
     ):
         super(Meta_mini, self).__init__()
 
-        self.update_lr = inner_lr
-        self.meta_lr = meta_lr
-        self.update_step = inner_steps
-        self.update_step_test = inner_eval_steps
-        self.update_step_test_contrastive = contrastive_eval_steps
-        self.contrastive_lr = contrastive_lr
-        self.contrastive_steps = contrastive_steps
+        self.update_lr = args.inner_lr
+        self.meta_lr = args.lr
+        self.update_step = args.inner_steps
+        self.update_step_test = args.inner_eval_steps
+        self.update_step_test_contrastive = args.contrastive_eval_steps
+        self.contrastive_lr = args.contrastive_lr
+        self.contrastive_steps = args.contrastive_steps
         if self.contrastive_lr == 0.0 or self.contrastive_steps == 0:
             self.contrastive = False
         else:
             self.contrastive = True
         self.num_contrastive_samples = 50
-        self.first_order = first_order
-        if first_order:
+        self.first_order = args.first_order
+        if self.first_order:
             self.forward = self.forward_FOMAML
         else:
             self.forward = self.forward_SOMAML
         self.linear_shape = 36
         self.net = Learner(config, 3, 84)
-        self.meta_optim = optim.Adam(self.net.parameters(), lr=self.meta_lr)
+        self.meta_optim = optim.Adam(self.net.parameters(), lr=self.meta_lr,
+                                     weight_decay=args.weight_decay,
+                                     )
+        if args.decay_epochs > 0 and args.decay_rate > 0:
+            self.scheduler = optim.lr_scheduler.StepLR(self.meta_optim, step_size=args.decay_epochs, gamma=args.decay_rate)
+        else:
+            self.scheduler = None
+        self.lr_scheduler_count = 0
+        self.warmup_epochs = args.warmup_epochs
+
 
     def load_model(self, save_path, epoch):
         path = os.path.join(save_path, "E{}S0.pt".format(epoch))
@@ -150,7 +152,7 @@ class Meta_mini(nn.Module):
         querysz = x_qry.size(1)
         contrastive_configs = self.get_fc_configs(len(y_qry))
         fc_configs = self.get_fc_configs(y_qry)
-
+        
         # self.meta_optim.zero_grad()
         # record per step
         losses_q = [0 for _ in range(self.update_step + 1)]
@@ -248,10 +250,14 @@ class Meta_mini(nn.Module):
         loss_q = losses_q[-1] / task_num
 
         # self.meta_optim.step()
+        # if self.scheduler is not None:
+        #     self.scheduler.step()
         accs = np.array(corrects) / (querysz * task_num)
         if 'vars.16' in list(zip(*list(self.net.named_parameters())))[0]:
             self.net.pop()
-        return loss_q.item(), accs[-1]
+        if isinstance(loss_q, torch.Tensor):
+            loss_q = loss_q.item()
+        return loss_q, accs[-1]
 
     def forward_SOMAML(self, x_spt, y_spt, x_qry, y_qry):
         """

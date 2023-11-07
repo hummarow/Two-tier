@@ -21,7 +21,23 @@ class Learner(nn.Module):
         self.append(config)
 
     def append(self, config, zero=False):
-        self.config.extend(config)
+        def extract_basicblock(ch_out, ch_in, stride=1, expansion=1):
+            return [
+                ("conv2d", [ch_out, ch_in, 3, 3, stride, 1]),
+                ("bn", [ch_out]),
+                ("relu", [True]),
+                ("conv2d", [ch_out, ch_out, 3, 3, 1, 1]),
+                ("bn", [ch_out]),
+            ]
+        # Extract the basic block in the config list.
+        i = 0
+        while i < len(config):
+            if config[i][0] == "basicblock":
+                ch_out, ch_in, stride, expansion = config[i][1]
+                basicblock = extract_basicblock(ch_out, ch_in, stride, expansion)
+                config = config[:i] + basicblock + config[i+1:]
+            i += 1
+
         for i, (name, param) in enumerate(config):
             if name == "conv2d":
                 # [ch_out, ch_in, kernelsz, kernelsz]
@@ -75,10 +91,15 @@ class Learner(nn.Module):
                 "reshape",
                 "leakyrelu",
                 "sigmoid",
+                "identity_in",
+                "identity_out"
             ]:
                 continue
             else:
+                breakpoint()
                 raise NotImplementedError
+            
+            self.config.extend(config)
 
     def pop(self):
         layer_old, vars_old = self.config[-1], self.vars[-2:]
@@ -104,46 +125,50 @@ class Learner(nn.Module):
         idx = 0
         bn_idx = 0
         x_flatten = None
-
         for name, param in self.config:
-            if name is 'conv2d':
+            if name == 'conv2d':
                 w, b = vars[idx], vars[idx + 1]
                 # remember to keep synchrozied of forward_encoder and forward_decoder!
                 x = F.conv2d(x, w, b, stride=param[4], padding=param[5])
                 idx += 2
-            elif name is 'linear':
+            elif name == 'linear':
                 x_flatten = x
                 w, b = vars[idx], vars[idx + 1]
                 x = F.linear(x, w, b)
                 idx += 2
-            elif name is 'bn':
+            elif name == 'bn':
                 w, b = vars[idx], vars[idx + 1]
                 running_mean, running_var = self.vars_bn[bn_idx], self.vars_bn[bn_idx+1]
                 x = F.batch_norm(x, running_mean, running_var, weight=w, bias=b, training=bn_training)
                 idx += 2
                 bn_idx += 2
-            elif name is 'flatten':
+            elif name == 'flatten':
                 # print(x.shape)
                 # x = x.view(x.size(0), -1)
                 x = x.reshape(x.size(0), -1)
-            elif name is 'reshape':
+            elif name == 'reshape':
                 # [b, 8] => [b, 2, 2, 2]
                 x = x.view(x.size(0), *param)
-            elif name is 'relu':
+            elif name == 'relu':
                 x = F.relu(x, inplace=param[0])
-            elif name is 'leakyrelu':
+            elif name == 'leakyrelu':
                 x = F.leaky_relu(x, negative_slope=param[0], inplace=param[1])
-            elif name is 'tanh':
+            elif name == 'tanh':
                 x = F.tanh(x)
-            elif name is 'sigmoid':
+            elif name == 'sigmoid':
                 x = torch.sigmoid(x)
-            elif name is 'upsample':
+            elif name == 'upsample':
                 x = F.upsample_nearest(x, scale_factor=param[0])
-            elif name is 'max_pool2d':
+            elif name == 'max_pool2d':
                 x = F.max_pool2d(x, param[0], param[1], param[2])
-            elif name is 'avg_pool2d':
+            elif name == 'avg_pool2d':
                 x = F.avg_pool2d(x, param[0], param[1], param[2])
-
+            elif name == 'identity_in':
+                self.buffer = x.clone()
+                x = x   # Well.
+            elif name == 'identity_out':
+                breakpoint()
+                x = x + self.buffer
             else:
                 raise NotImplementedError
 

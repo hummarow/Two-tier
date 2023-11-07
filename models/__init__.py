@@ -249,34 +249,35 @@ def get_model(args):
     classifier = [
         ("linear", [args.num_ways, 512 * expansion]),
     ]
-    resnet = input_block + layer1 + layer2 + layer3 + layer4 + avgpool + classifier
+    resnet_nohead = input_block + layer1 + layer2 + layer3 + layer4 + avgpool
+    resnet = resnet_nohead + classifier
 
-    def bottleneck(ch_in, ch_out, stride=1, expansion=1):
-        return [
-            ("identity_in", []),
-            ("conv2d", [ch_out, ch_in, 1, 1, 1, 0]),
-            ("bn", [ch_out]),
-            ("relu", [True]),
-            ("conv2d", [ch_out, ch_out, 3, 3, stride, 1]),
-            ("bn", [ch_out]),
-            ("relu", [True]),
-            ("conv2d", [ch_out * expansion, ch_out, 1, 1, 1, 0]),
-            ("bn", [ch_out * expansion]),
-            ("identity_out", []),
-            ("relu", [True]),
-        ]
+    # def bottleneck(ch_in, ch_out, stride=1, expansion=1):
+    #     return [
+    #         ("identity_in", []),
+    #         ("conv2d", [ch_out, ch_in, 1, 1, 1, 0]),
+    #         ("bn", [ch_out]),
+    #         ("relu", [True]),
+    #         ("conv2d", [ch_out, ch_out, 3, 3, stride, 1]),
+    #         ("bn", [ch_out]),
+    #         ("relu", [True]),
+    #         ("conv2d", [ch_out * expansion, ch_out, 1, 1, 1, 0]),
+    #         ("bn", [ch_out * expansion]),
+    #         ("identity_out", []),
+    #         ("relu", [True]),
+    #     ]
 
-    def basicblock(ch_in, ch_out, stride=1, expansion=1):
-        return [
-            ("identity_in", []),
-            ("conv2d", [ch_out, ch_in, 3, 3, stride, 1]),
-            ("bn", [ch_out]),
-            ("relu", [True]),
-            ("conv2d", [ch_out*expansion, ch_out, 3, 3, 1, 1]),
-            ("bn", [ch_out]),
-            ("identity_out", []),
-            ("relu", [True]),
-        ]
+    # def basicblock(ch_in, ch_out, stride=1, expansion=1):
+    #     return [
+    #         ("identity_in", []),
+    #         ("conv2d", [ch_out, ch_in, 3, 3, stride, 1]),
+    #         ("bn", [ch_out]),
+    #         ("relu", [True]),
+    #         ("conv2d", [ch_out*expansion, ch_out, 3, 3, 1, 1]),
+    #         ("bn", [ch_out]),
+    #         ("identity_out", []),
+    #         ("relu", [True]),
+    #     ]
 
 
     if args.deploy == 'vanilla':
@@ -292,7 +293,9 @@ def get_model(args):
         model = ProtoNet_AdaTok_EntMin(backbone, args.num_adapters,
                                        args.ada_steps, args.ada_lr)
     elif args.deploy == 'maml':
-        model = Meta_mini(args.lr, args.inner_lr, args.inner_steps, args.inner_eval_steps, args.contrastive_lr, args.contrastive_steps, args.contrastive_eval_steps, args.first_order, model_config_no_classifier)
+        model = Meta_mini(args, model_config_no_classifier)
+    elif args.deploy == 'resnet':
+        model = Meta_mini(args, resnet_nohead)
     else:
         raise ValueError(f'deploy method {args.deploy} is not supported.')
     return model

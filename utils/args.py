@@ -104,7 +104,7 @@ def get_args_parser():
 
     # Deployment params
     parser.add_argument("--deploy", type=str, default="vanilla",
-                        choices=['vanilla', 'finetune', 'finetune_autolr', 'ada_tokens', 'ada_tokens_entmin', 'maml_l2l', 'maml'],
+                        choices=['vanilla', 'finetune', 'finetune_autolr', 'ada_tokens', 'ada_tokens_entmin', 'maml_l2l', 'maml', 'resnet'],
                         help="Which few-shot model to be deployed for meta-testing.")
     parser.add_argument('--num_adapters', default=1, type=int, help='Number of adapter tokens')
     parser.add_argument('--ada_steps', default=40, type=int, help='Number of feature adaptation steps')
@@ -235,8 +235,6 @@ def get_args_parser():
     parser.add_argument('--inner_steps', default=5, type=int, help='Number of inner loop steps')
     parser.add_argument('--inner_eval_steps', default=10, type=int, help='Number of inner loop steps for evaluation')
     parser.add_argument('--inner_lr', default=0.01, type=float, help='Learning rate of inner loop')
-#     parser.add_argument('--meta_lr', default=0.001, type=float, help='Learning rate of meta optimizer')
-#     parser.add_argument('--meta_steps', default=1, type=int, help='Number of meta steps')
     parser.add_argument('--first_order', action='store_true', help='Use first order approximation of MAML')
     
     # Contrastive Learning parameters
@@ -244,8 +242,13 @@ def get_args_parser():
     parser.add_argument('--contrastive_steps', default=5, type=int, help='Number of contrastive learning steps')
     parser.add_argument('--contrastive_eval_steps', default=10, type=int, help='Number of contrastive learning steps for evaluation')
 
-
     parser.add_argument('--pretrain', action='store_true', help='Pretrain the model')
 
+    # Optuna parameters
+    # parser.add_argument('--optuna', action='store_true', help='Optuna hyperparameter search')
+    parser.add_argument('--optuna', nargs="+", default=[],
+                        # choices=['lr', 'inner_lr', 'contrastive_lr', 'steps', 'inner_steps', 'contrastive_steps'],
+                        help='arguments for optuna hyperparameter search')
+    parser.add_argument('--optuna_n_trials', default=5, type=int, help='Number of trials for optuna')
 
     return parser

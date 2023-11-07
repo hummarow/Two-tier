@@ -1,6 +1,7 @@
 import math
 import sys
 import warnings
+import optuna
 from typing import Iterable, Optional
 
 import torch
@@ -32,7 +33,7 @@ def train_one_epoch(data_loader_dict: dict,
                     pretrain=False,
                     ):
 
-    global_step = epoch * len(data_loader_dict)
+    global_step = epoch * len(list(data_loader_dict.items())[0][1])
 
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
@@ -147,8 +148,15 @@ def train_one_epoch(data_loader_dict: dict,
                 writer.add_scalar(f"loss/{source}", scalar_value=loss_value, global_step=global_step)
                 writer.add_scalar(f"acc/{source}", scalar_value=acc1, global_step=global_step)
                 # writer.add_scalar(f"train/lr", scalar_value=lr, global_step=global_step)
+
+
             # TEST backward for every source
             model.meta_optim.step()
+            if model.scheduler is not None:
+                if model.lr_scheduler_count < model.warmup_epochs:
+                    model.lr_scheduler_count += 1
+                else:
+                    model.scheduler.step()
         global_step += 1
         # model.meta_optim.step() # not avtivated when using TEST code
         average_loss = sum(loss_per_source.values()) / len(loss_per_source.values())
@@ -167,6 +175,10 @@ def train_one_epoch(data_loader_dict: dict,
             for source in data_loader_dict.keys():
                 print_string += f'* {source} Acc@1 {metric_logger.meters[f"acc/{source}"].global_avg:.3f} loss {metric_logger.meters[f"loss/{source}"].global_avg:.3f}  '
             print(print_string)
+        
+        # if utils.is_main_process():
+        #     # Record average over steps in an epoch
+        #     writer.add_scalar(f"loss/average_epoch", scalar_value=average_loss, global_step=epoch)
             
 
     # gather the stats from all processes
@@ -175,7 +187,7 @@ def train_one_epoch(data_loader_dict: dict,
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 
-def evaluate(data_loaders, model, criterion, device, writer, seed=None, ep=None):
+def evaluate(data_loaders, model, criterion, device, writer, global_step, seed=None, ep=None):
     if isinstance(data_loaders, dict):
         test_stats_lst = {}
         test_stats_glb = {}
@@ -186,18 +198,19 @@ def evaluate(data_loaders, model, criterion, device, writer, seed=None, ep=None)
             test_stats = _evaluate(data_loader, model, criterion, device, seed_j, ep)
             test_stats_lst[source] = test_stats
             test_stats_glb[source] = test_stats['acc1']
+            test_stats_glb[f'{source}_loss'] = test_stats['loss']
             # Record in tensorboard
             if utils.is_main_process():
-                writer.add_scalar(f"test/{source}/acc1", scalar_value=test_stats['acc1'], global_step=ep)
-                writer.add_scalar(f"test/{source}/loss", scalar_value=test_stats['loss'], global_step=ep)
+                writer.add_scalar(f"test/{source}/acc1", scalar_value=test_stats['acc1'], global_step=global_step)
+                writer.add_scalar(f"test/{source}/loss", scalar_value=test_stats['loss'], global_step=global_step)
                 writer.close()
         # apart from individual's acc1, accumulate metrics over all domains to compute mean
         for k in test_stats_lst[source].keys():
             test_stats_glb[k] = torch.tensor([test_stats[k] for test_stats in test_stats_lst.values()]).mean().item()
         # Record in tensorboard
         if utils.is_main_process():
-            writer.add_scalar(f"test/average/acc1", scalar_value=test_stats_glb['acc1'], global_step=ep)
-            writer.add_scalar(f"test/average/loss", scalar_value=test_stats_glb['loss'], global_step=ep)
+            writer.add_scalar(f"test/average/acc1", scalar_value=test_stats_glb['acc1'], global_step=global_step)
+            writer.add_scalar(f"test/average/loss", scalar_value=test_stats_glb['loss'], global_step=global_step)
             writer.close()
 
         return test_stats_glb
@@ -251,7 +264,6 @@ def _evaluate(data_loader, model, criterion, device, seed=None, ep=None):
                 loss, acc1 = model.evaluate(SupportTensor, SupportLabel, x, y)
             else:
                 output = model(SupportTensor, SupportLabel, x)
-
                 output = output.view(x.shape[0] * x.shape[1], -1)
                 y = y.view(-1)
                 loss = criterion(output, y)
@@ -263,7 +275,6 @@ def _evaluate(data_loader, model, criterion, device, seed=None, ep=None):
         # metric_logger.meters['acc5'].update(acc5.item(), n=batch_size)
         metric_logger.update(n_ways=SupportLabel.max()+1)
         metric_logger.update(n_imgs=SupportTensor.shape[1] + x.shape[1])
-
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
 
