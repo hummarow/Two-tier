@@ -1,3 +1,5 @@
 *__pycache__*
 *.sh
 outputs/
+optuna/
+10way_optuna/
