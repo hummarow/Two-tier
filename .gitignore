@@ -3,3 +3,5 @@
 outputs/
 optuna/
 10way_optuna/
+*.db
+*.out
