@@ -12,88 +12,103 @@ from .meta_h5_dataset import FullMetaDatasetH5
 from .meta_dataset.utils import Split
 
 
-def get_sets(args):
-    if args.dataset == 'cifar_fs':
+def get_sets(args, transform_type=None):
+    if args.dataset == "cifar_fs":
         from .cifar_fs import dataset_setting
-    elif args.dataset == 'cifar_fs_elite': # + elite data augmentation
+    elif args.dataset == "cifar_fs_elite":  # + elite data augmentation
         from .cifar_fs_elite import dataset_setting
-    elif args.dataset == 'mini_imagenet':
+    elif args.dataset == "mini_imagenet":
         from .mini_imagenet import dataset_setting
-    elif args.dataset == 'meta_dataset':
+    elif args.dataset == "meta_dataset":
         if args.eval:
             trainSet = valSet = None
             testSet = {}
             for source in args.test_sources:
-                testSet[source] = FullMetaDatasetH5(args, Split.TEST, source)
+                testSet[source] = FullMetaDatasetH5(
+                    args, Split.TEST, source, transform_type=transform_type
+                )
         else:
             trainSet = {}
             for source in args.base_sources:
-                trainSet[source] = FullMetaDatasetH5(args, Split.TRAIN, source)
+                trainSet[source] = FullMetaDatasetH5(
+                    args, Split.TRAIN, source, transform_type=transform_type
+                )
             valSet = {}
             for source in args.val_sources:
                 # valSet[source] = MetaValDataset(os.path.join(args.data_path, source,
                 #                                              f'val_ep{args.nValEpisode}_img{args.image_size}.h5'),
                 #                                 num_episodes=args.nValEpisode)
-                valSet[source] = FullMetaDatasetH5(args, Split.VALID, source)
+                valSet[source] = FullMetaDatasetH5(
+                    args, Split.VALID, source, transform_type=transform_type
+                )
             testSet = None
         return trainSet, valSet, testSet
     else:
-        raise ValueError(f'{args.dataset} is not supported.')
+        raise ValueError(f"{args.dataset} is not supported.")
 
     # If not meta_dataset
-    trainTransform, valTransform, inputW, inputH, \
-    trainDir, valDir, testDir, episodeJson, nbCls = \
-            dataset_setting(args.nSupport, args.img_size)
+    (
+        trainTransform,
+        valTransform,
+        inputW,
+        inputH,
+        trainDir,
+        valDir,
+        testDir,
+        episodeJson,
+        nbCls,
+    ) = dataset_setting(args.nSupport, args.img_size)
 
-    trainSet = EpisodeDataset(imgDir = trainDir,
-                              nCls = args.nClsEpisode,
-                              nSupport = args.nSupport,
-                              nQuery = args.nQuery,
-                              transform = trainTransform,
-                              inputW = inputW,
-                              inputH = inputH,
-                              nEpisode = args.nEpisode)
+    trainSet = EpisodeDataset(
+        imgDir=trainDir,
+        nCls=args.nClsEpisode,
+        nSupport=args.nSupport,
+        nQuery=args.nQuery,
+        transform=trainTransform,
+        inputW=inputW,
+        inputH=inputH,
+        nEpisode=args.nEpisode,
+    )
 
-    valSet = EpisodeJSONDataset(episodeJson,
-                                valDir,
-                                inputW,
-                                inputH,
-                                valTransform)
+    valSet = EpisodeJSONDataset(episodeJson, valDir, inputW, inputH, valTransform)
 
-    testSet = EpisodeDataset(imgDir = testDir,
-                             nCls = args.nClsEpisode,
-                             nSupport = args.nSupport,
-                             nQuery = args.nQuery,
-                             transform = valTransform,
-                             inputW = inputW,
-                             inputH = inputH,
-                             nEpisode = args.nEpisode)
+    testSet = EpisodeDataset(
+        imgDir=testDir,
+        nCls=args.nClsEpisode,
+        nSupport=args.nSupport,
+        nQuery=args.nQuery,
+        transform=valTransform,
+        inputW=inputW,
+        inputH=inputH,
+        nEpisode=args.nEpisode,
+    )
 
     return trainSet, valSet, testSet
 
 
-def get_loaders(args, num_tasks, global_rank):
+def get_loaders(args, num_tasks, global_rank, transform_type=None):
     # datasets
     if args.eval:
-        _, _, dataset_vals = get_sets(args)
+        _, _, dataset_vals = get_sets(args, transform_type=transform_type)
     else:
-        dataset_trains, dataset_vals, _ = get_sets(args)
+        dataset_trains, dataset_vals, _ = get_sets(args, transform_type=transform_type)
 
     # Worker init function
-    if 'meta_dataset' in args.dataset: # meta_dataset & meta_dataset_h5
-        #worker_init_fn = partial(worker_init_fn_, seed=args.seed)
-        #worker_init_fn = lambda _: np.random.seed()
+    if "meta_dataset" in args.dataset:  # meta_dataset & meta_dataset_h5
+        # worker_init_fn = partial(worker_init_fn_, seed=args.seed)
+        # worker_init_fn = lambda _: np.random.seed()
         def worker_init_fn(worker_id):
             worker_seed = torch.initial_seed() % 2**32
             np.random.seed(worker_seed)
             random.seed(worker_seed)
+
     else:
         worker_init_fn = None
 
     # Val loader
     # NOTE: meta-dataset has separate val-set per domain
     if not isinstance(dataset_vals, dict):
-        dataset_vals = {'single': dataset_vals}
+        dataset_vals = {"single": dataset_vals}
 
     data_loader_val = {}
 
@@ -101,11 +116,14 @@ def get_loaders(args, num_tasks, global_rank):
         if args.distributed:
             if args.dist_eval:
                 if len(dataset_val) % num_tasks != 0:
-                    print('Warning: Enabling distributed evaluation with an eval dataset not divisible by process number. '
-                          'This will slightly alter validation results as extra duplicate entries are added to achieve '
-                          'equal num of samples per-process.')
+                    print(
+                        "Warning: Enabling distributed evaluation with an eval dataset not divisible by process number. "
+                        "This will slightly alter validation results as extra duplicate entries are added to achieve "
+                        "equal num of samples per-process."
+                    )
                 sampler_val = torch.utils.data.DistributedSampler(
-                    dataset_val, num_replicas=num_tasks, rank=global_rank, shuffle=False)
+                    dataset_val, num_replicas=num_tasks, rank=global_rank, shuffle=False
+                )
             else:
                 sampler_val = torch.utils.data.SequentialSampler(dataset_val)
         else:
@@ -115,35 +133,42 @@ def get_loaders(args, num_tasks, global_rank):
         generator.manual_seed(args.seed + 10000 + j)
 
         data_loader = torch.utils.data.DataLoader(
-            dataset_val, sampler=sampler_val,
+            dataset_val,
+            sampler=sampler_val,
             batch_size=1,
-            num_workers=args.num_workers, # more workers can take too much CPU
+            num_workers=args.num_workers,  # more workers can take too much CPU
             pin_memory=args.pin_mem,
             drop_last=False,
             worker_init_fn=worker_init_fn,
-            generator=generator
+            generator=generator,
         )
         data_loader_val[source] = data_loader
 
-    if 'single' in dataset_vals:
-        data_loader_val = data_loader_val['single']
+    if "single" in dataset_vals:
+        data_loader_val = data_loader_val["single"]
 
     if args.eval:
         return None, data_loader_val
 
     # Train loader
     if not isinstance(dataset_trains, dict):
-        dataset_trains = {'single': dataset_trains}
+        dataset_trains = {"single": dataset_trains}
     data_loader_train = {}
     for j, (source, dataset_train) in enumerate(dataset_trains.items()):
         if args.distributed:
-            if args.repeated_aug: # (by default OFF)
+            if args.repeated_aug:  # (by default OFF)
                 sampler_train = RASampler(
-                    dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
+                    dataset_train,
+                    num_replicas=num_tasks,
+                    rank=global_rank,
+                    shuffle=True,
                 )
             else:
                 sampler_train = torch.utils.data.DistributedSampler(
-                    dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
+                    dataset_train,
+                    num_replicas=num_tasks,
+                    rank=global_rank,
+                    shuffle=True,
                 )
         else:
             sampler_train = torch.utils.data.RandomSampler(dataset_train)
@@ -152,18 +177,19 @@ def get_loaders(args, num_tasks, global_rank):
         generator.manual_seed(args.seed)
 
         data_loader = torch.utils.data.DataLoader(
-            dataset_train, sampler=sampler_train,
+            dataset_train,
+            sampler=sampler_train,
             batch_size=args.batch_size,
             num_workers=args.num_workers,
             pin_memory=args.pin_mem,
             drop_last=True,
             worker_init_fn=worker_init_fn,
-            generator=generator
+            generator=generator,
         )
         data_loader_train[source] = data_loader
 
-    if 'single' in dataset_trains:
-        data_loader_train = data_loader_train['single']
+    if "single" in dataset_trains:
+        data_loader_train = data_loader_train["single"]
 
     return data_loader_train, data_loader_val
 
@@ -171,7 +197,7 @@ def get_loaders(args, num_tasks, global_rank):
 def get_bscd_loader(dataset="EuroSAT", test_n_way=5, n_shot=5, image_size=224):
     iter_num = 600
     n_query = 15
-    few_shot_params = dict(n_way=test_n_way , n_support=n_shot)
+    few_shot_params = dict(n_way=test_n_way, n_support=n_shot)
 
     if dataset == "EuroSAT":
         from .cdfsl.EuroSAT_few_shot import SetDataManager
@@ -182,17 +208,27 @@ def get_bscd_loader(dataset="EuroSAT", test_n_way=5, n_shot=5, image_size=224):
     elif dataset == "ChestX":
         from .cdfsl.ChestX_few_shot import SetDataManager
     else:
-        raise ValueError(f'Datast {dataset} is not supported.')
+        raise ValueError(f"Datast {dataset} is not supported.")
 
-    datamgr = SetDataManager(image_size, n_eposide=iter_num, n_query=n_query, **few_shot_params)
-    novel_loader = datamgr.get_data_loader(aug =False)
+    datamgr = SetDataManager(
+        image_size, n_eposide=iter_num, n_query=n_query, **few_shot_params
+    )
+    novel_loader = datamgr.get_data_loader(aug=False)
 
     def _loader_wrap():
         for x, y in novel_loader:
-            SupportTensor = x[:,:n_shot].contiguous().view(1, test_n_way*n_shot, *x.size()[2:])
-            QryTensor = x[:, n_shot:].contiguous().view(1, test_n_way*n_query, *x.size()[2:])
-            SupportLabel = torch.from_numpy( np.repeat(range( test_n_way ), n_shot) ).view(1, test_n_way*n_shot)
-            QryLabel = torch.from_numpy( np.repeat(range( test_n_way ), n_query) ).view(1, test_n_way*n_query)
+            SupportTensor = (
+                x[:, :n_shot].contiguous().view(1, test_n_way * n_shot, *x.size()[2:])
+            )
+            QryTensor = (
+                x[:, n_shot:].contiguous().view(1, test_n_way * n_query, *x.size()[2:])
+            )
+            SupportLabel = torch.from_numpy(np.repeat(range(test_n_way), n_shot)).view(
+                1, test_n_way * n_shot
+            )
+            QryLabel = torch.from_numpy(np.repeat(range(test_n_way), n_query)).view(
+                1, test_n_way * n_query
+            )
 
             yield SupportTensor, SupportLabel, QryTensor, QryLabel
 
@@ -209,6 +245,7 @@ def get_bscd_loader(dataset="EuroSAT", test_n_way=5, n_shot=5, image_size=224):
 
         def __len__(self):
             return len(novel_loader)
+
         def __iter__(self):
             return self.iterable
 

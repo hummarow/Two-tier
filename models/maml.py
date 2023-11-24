@@ -19,28 +19,9 @@ from torchvision.transforms import transforms
 from torchvision.transforms import functional as TF
 from pytorch_metric_learning import losses
 
-
-class Rotate:
-    def __init__(self, angles: list):
-        self.angles = angles
-
-    def __call__(self, img):
-        angle = random.choice(self.angles)
-        return TF.rotate(img, angle)
-
-
-def transform(img):
-    """ """
-    original_size = img.size()
-    _transform = transforms.Compose(
-        [
-            transforms.RandomCrop(84),
-            transforms.Resize(original_size[2]),
-            transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.4),
-        ]
-    )
-
-    return _transform(img)
+from datasets.meta_dataset.transform import to_tensor, random_augmentation
+from datasets.meta_dataset.config import DataConfig
+from datasets.meta_dataset.utils import Split
 
 
 class Meta_mini(nn.Module):
@@ -58,6 +39,7 @@ class Meta_mini(nn.Module):
         self.update_step_test_contrastive = args.contrastive_eval_steps
         self.contrastive_lr = args.contrastive_lr
         self.contrastive_steps = args.contrastive_steps
+        self.device = args.device
         if self.contrastive_lr == 0.0 or self.contrastive_steps == 0:
             self.contrastive = False
         else:
@@ -69,17 +51,21 @@ class Meta_mini(nn.Module):
         else:
             self.forward = self.forward_SOMAML
         self.linear_shape = 36
-        self.net = Learner(config, 3, 84)
-        self.meta_optim = optim.Adam(self.net.parameters(), lr=self.meta_lr,
-                                     weight_decay=args.weight_decay,
-                                     )
+        self.net = Learner(config, 3, 84).to(self.device)
+        self.meta_optim = optim.Adam(
+            self.net.parameters(),
+            lr=self.meta_lr,
+            weight_decay=args.weight_decay,
+        )
         if args.decay_epochs > 0 and args.decay_rate > 0:
-            self.scheduler = optim.lr_scheduler.StepLR(self.meta_optim, step_size=args.decay_epochs, gamma=args.decay_rate)
+            self.scheduler = optim.lr_scheduler.StepLR(
+                self.meta_optim, step_size=args.decay_epochs, gamma=args.decay_rate
+            )
         else:
             self.scheduler = None
         self.lr_scheduler_count = 0
         self.warmup_epochs = args.warmup_epochs
-
+        self.args = args
 
     def load_model(self, save_path, epoch):
         path = os.path.join(save_path, "E{}S0.pt".format(epoch))
@@ -99,6 +85,19 @@ class Meta_mini(nn.Module):
             },
             path,
         )
+
+    def transform(self, img, split):
+        """ """
+        data_config = DataConfig(self.args)
+        _transform = random_augmentation(data_config, split)
+
+        return _transform(img)
+
+    def to_tensor(self, img, split):
+        data_config = DataConfig(self.args)
+        _transform = to_tensor(data_config, split)
+
+        return _transform(img)
 
     def clip_grad_by_norm_(self, grad, max_norm):
         """
@@ -131,28 +130,34 @@ class Meta_mini(nn.Module):
         for p1, p2 in self.net.named_parameters():
             if p1 == "vars.16" or p1 == "vars.17":
                 p2.data = p2.data * var
-    
+
     def get_fc_configs(self, y_qry):
         if isinstance(y_qry, int):
             # Contrastive Learning y_qry actually doesn't stand for
             # query labels, but is the number of tasks
-            n_ways = [32]*y_qry
+            n_ways = [32] * y_qry
         else:
             n_ways = list(map(lambda x: max(x).item() + 1, y_qry))
-            
-        return [[
-            ("linear", [n_way, 32 * self.linear_shape]),
-        ] for n_way in n_ways]
+
+        return [
+            [
+                ("linear", [n_way, 32 * self.linear_shape]),
+            ]
+            for n_way in n_ways
+        ]
 
         # Don't need meta optim for last layer
         # self.opt_fc = optim.Adam(self.net.named_parameters[], lr=self.meta_lr)
 
     def forward_FOMAML(self, x_spt, y_spt, x_qry, y_qry):
+        x_spt_aug = [self.transform(img, Split["TRAIN"]) for img in x_spt]
+        x_spt = torch.stack([self.to_tensor(img, Split["TRAIN"]) for img in x_spt])
+        x_qry = torch.stack([self.to_tensor(img, Split["TRAIN"]) for img in x_qry])
         task_num, setsz, c_, h, w = x_spt.size()
         querysz = x_qry.size(1)
         contrastive_configs = self.get_fc_configs(len(y_qry))
         fc_configs = self.get_fc_configs(y_qry)
-        
+
         # self.meta_optim.zero_grad()
         # record per step
         losses_q = [0 for _ in range(self.update_step + 1)]
@@ -160,14 +165,14 @@ class Meta_mini(nn.Module):
 
         # Variables for contrastive learning
         loss_fn = losses.SelfSupervisedLoss(losses.NTXentLoss())
-        x_spt_aug = [transform(img) for img in x_spt]
+        # x_spt_aug = [self.transform(img, Split["TRAIN"]) for img in x_spt]
         fast_weights_all_tasks = []
         # Contrastive Learning
         for i in range(task_num):
-            if 'vars.16' in list(zip(*list(self.net.named_parameters())))[0]:
+            if "vars.16" in list(zip(*list(self.net.named_parameters())))[0]:
                 self.net.pop()
             self.net.append(contrastive_configs[i])
-            self.net.cuda()
+            self.net = self.net.to(self.device)
             # self.set_last_layer_to_zero() # Problematic
 
             fast_weights = self.net.parameters()
@@ -176,31 +181,40 @@ class Meta_mini(nn.Module):
             if self.contrastive:
                 for k in range(self.contrastive_steps):
                     # 1. run the i-th task and compute loss for k=1~K-1
-                    idx = torch.randperm(len(x_spt[i]))[:self.num_contrastive_samples]
+                    idx = torch.randperm(len(x_spt[i]))[: self.num_contrastive_samples]
                     keys = self.net(x_spt[i][idx], fast_weights, bn_training=True)
-                    queries = self.net(x_spt_aug[i][idx], fast_weights, bn_training=True)
+                    queries = self.net(
+                        x_spt_aug[i][idx], fast_weights, bn_training=True
+                    )
                     loss = loss_fn(keys, queries)
                     # print('Contrastive Loss: {}'.format(loss.item()))
                     # 2. compute grad on theta_pi
                     grad = torch.autograd.grad(loss, fast_weights)
                     # 3. theta_pi = theta_pi - train_lr * grad
                     fast_weights = list(
-                        map(lambda p: p[1] - self.contrastive_lr * p[0], zip(grad, fast_weights))
+                        map(
+                            lambda p: p[1] - self.contrastive_lr * p[0],
+                            zip(grad, fast_weights),
+                        )
                     )
                 # breakpoint()
             fast_weights_all_tasks.append(fast_weights)
 
         # Get mean of fast_weights
-        contrastive_initialized_weights = list(map(lambda x: torch.stack(x).mean(0), zip(*fast_weights_all_tasks)))
+        contrastive_initialized_weights = list(
+            map(lambda x: torch.stack(x).mean(0), zip(*fast_weights_all_tasks))
+        )
         # contrastive_initialized_weights = list(torch.zeros_like(x, requires_grad=True) for x in contrastive_initialized_weights)
         for i in range(task_num):
-            if 'vars.16' in list(zip(*list(self.net.named_parameters())))[0]:
+            if "vars.16" in list(zip(*list(self.net.named_parameters())))[0]:
                 self.net.pop()
             self.net.append(fc_configs[i])
-            self.net.cuda()
+            self.net = self.net.to(self.device)
             self.set_last_layer_to_zero()
 
-            fast_weights = contrastive_initialized_weights[:-2] + list(self.net.parameters())[-2:]
+            fast_weights = (
+                contrastive_initialized_weights[:-2] + list(self.net.parameters())[-2:]
+            )
             # breakpoint()
             # 1. run the i-th task and compute loss for k=0
             logits = self.net(x_spt[i], vars=None, bn_training=True)
@@ -239,11 +253,13 @@ class Meta_mini(nn.Module):
 
                 with torch.no_grad():
                     pred_q = F.softmax(logits_q, dim=1).argmax(dim=1)
-                    correct = torch.eq(pred_q, y_qry[i]).sum().item()  # convert to numpy
+                    correct = (
+                        torch.eq(pred_q, y_qry[i]).sum().item()
+                    )  # convert to numpy
                     corrects[k + 1] = corrects[k + 1] + correct
                 loss_q.backward(retain_graph=True)
                 # loss_q.backward(retain_graph=k!=self.update_step-1)
-            # breakpoint()            
+            # breakpoint()
 
         # end of all tasks
         # sum over all losses on query set across all tasks
@@ -253,7 +269,7 @@ class Meta_mini(nn.Module):
         # if self.scheduler is not None:
         #     self.scheduler.step()
         accs = np.array(corrects) / (querysz * task_num)
-        if 'vars.16' in list(zip(*list(self.net.named_parameters())))[0]:
+        if "vars.16" in list(zip(*list(self.net.named_parameters())))[0]:
             self.net.pop()
         if isinstance(loss_q, torch.Tensor):
             loss_q = loss_q.item()
@@ -283,7 +299,10 @@ class Meta_mini(nn.Module):
                 loss, self.net.parameters(), retain_graph=True, create_graph=True
             )
             fast_weights = list(
-                map(lambda p: p[1] - self.update_lr * p[0], zip(grad, self.net.parameters()))
+                map(
+                    lambda p: p[1] - self.update_lr * p[0],
+                    zip(grad, self.net.parameters()),
+                )
             )
 
             # this is the loss and accuracy before first update
@@ -311,7 +330,9 @@ class Meta_mini(nn.Module):
             for k in range(1, self.update_step):
                 logits = self.net(x_spt[i], fast_weights, bn_training=True)
                 loss = F.cross_entropy(logits, y_spt[i])
-                grad = torch.autograd.grad(loss, fast_weights, retain_graph=True, create_graph=True)
+                grad = torch.autograd.grad(
+                    loss, fast_weights, retain_graph=True, create_graph=True
+                )
                 fast_weights = list(
                     map(lambda p: p[1] - self.update_lr * p[0], zip(grad, fast_weights))
                 )
@@ -328,7 +349,9 @@ class Meta_mini(nn.Module):
 
                 with torch.no_grad():
                     pred_q = F.softmax(logits_q, dim=1).argmax(dim=1)
-                    correct = torch.eq(pred_q, y_qry[i]).sum().item()  # convert to numpy
+                    correct = (
+                        torch.eq(pred_q, y_qry[i]).sum().item()
+                    )  # convert to numpy
                     corrects[k + 1] = corrects[k + 1] + correct
 
         self.meta_optim.zero_grad()
@@ -338,7 +361,7 @@ class Meta_mini(nn.Module):
         accs = np.array(corrects) / (querysz * task_num)
 
         return accs
-    
+
     def pretrain(self, x_spt, y_spt, x_qry, y_qry):
         task_num, setsz, c_, h, w = x_spt.size()
         assert task_num == 1
@@ -359,10 +382,10 @@ class Meta_mini(nn.Module):
         losses_q = [0 for _ in range(self.update_step + 1)]
         corrects = [0 for _ in range(self.update_step + 1)]
 
-        if 'vars.16' in list(zip(*list(self.net.named_parameters())))[0]:
+        if "vars.16" in list(zip(*list(self.net.named_parameters())))[0]:
             self.net.pop()
         self.net.append(fc_config)
-        self.net.cuda()
+        self.net = self.net.to(self.device)
         self.set_last_layer_to_zero()
 
         fast_weights = self.net.parameters()
@@ -375,6 +398,9 @@ class Meta_mini(nn.Module):
         return loss.item(), acc
 
     def evaluate(self, x_spt, y_spt, x_qry, y_qry):
+        x_spt_aug = [self.transform(img, Split["TEST"]) for img in x_spt]
+        x_spt = torch.stack([self.to_tensor(img, Split["TEST"]) for img in x_spt])
+        x_qry = torch.stack([self.to_tensor(img, Split["TEST"]) for img in x_qry])
         task_num, setsz, c_, h, w = x_spt.size()
         querysz = x_qry.size(1)
 
@@ -391,24 +417,24 @@ class Meta_mini(nn.Module):
         # Variables for contrastive learning
         # loss_fn = losses.NTXentLoss()
         loss_fn = losses.SelfSupervisedLoss(losses.NTXentLoss())
-        x_spt_aug = [transform(img) for img in x_spt]
+        # x_spt_aug = [self.transform(img, Split["TEST"]) for img in x_spt]
         fast_weights_all_tasks = []
         net.train()
-        for i in range(task_num):    
+        for i in range(task_num):
             # Contrastive Learning
-            if 'vars.16' in list(zip(*list(net.named_parameters())))[0]:
+            if "vars.16" in list(zip(*list(net.named_parameters())))[0]:
                 net.pop()
             net.append(contrastive_configs[i])
-            net.cuda()
+            net = net.to(self.device)
             # self.set_last_layer_to_zero()
 
             fast_weights = net.parameters()
             for k in range(self.update_step_test_contrastive):
                 # 1. run the i-th task and compute loss for k=1~K-1
-                idx = torch.randperm(len(x_spt[i]))[:self.num_contrastive_samples]
+                idx = torch.randperm(len(x_spt[i]))[: self.num_contrastive_samples]
                 keys = net(x_spt[i][idx], fast_weights, bn_training=True)
                 queries = net(x_spt_aug[i][idx], fast_weights, bn_training=True)
-                
+
                 # embeddings = torch.cat((keys, queries), dim=0)
                 # labels = torch.cat((y_spt[i][idx], y_spt[i][idx]), dim=0)
                 # loss = loss_fn(embeddings, labels)
@@ -422,17 +448,21 @@ class Meta_mini(nn.Module):
             fast_weights_all_tasks.append(fast_weights)
 
         # Get mean of fast_weights
-        contrastive_initialized_weights = list(map(lambda x: torch.stack(x).mean(0), zip(*fast_weights_all_tasks)))
+        contrastive_initialized_weights = list(
+            map(lambda x: torch.stack(x).mean(0), zip(*fast_weights_all_tasks))
+        )
         # fast_weights = net.parameters()
         for i in range(task_num):
-            if 'vars.16' in list(zip(*list(net.named_parameters())))[0]:
+            if "vars.16" in list(zip(*list(net.named_parameters())))[0]:
                 net.pop()
             net.append(fc_configs[i])
-            net.cuda()
+            net = net.to(self.device)
             self.set_last_layer_to_zero()
 
             # fast_weights = net.parameters()
-            fast_weights = contrastive_initialized_weights[:-2] + list(net.parameters())[-2:]
+            fast_weights = (
+                contrastive_initialized_weights[:-2] + list(net.parameters())[-2:]
+            )
 
             # 1. run the i-th task and compute loss for k=0
             logits = net(x_spt[i], vars=None, bn_training=True)
@@ -471,7 +501,9 @@ class Meta_mini(nn.Module):
 
                 with torch.no_grad():
                     pred_q = F.softmax(logits_q, dim=1).argmax(dim=1)
-                    correct = torch.eq(pred_q, y_qry[i]).sum().item()  # convert to numpy
+                    correct = (
+                        torch.eq(pred_q, y_qry[i]).sum().item()
+                    )  # convert to numpy
                     corrects[k + 1] = corrects[k + 1] + correct
 
         # end of all tasks
